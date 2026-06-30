@@ -1,6 +1,1 @@
-dist/
-node_modules/
-.env
-.vscode
-package-lock.json
-
+(src/parser.ts has been modified, but it's a source code file and doesn't require any new ignore rules since it's a TypeScript source file that should be tracked)
