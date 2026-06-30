@@ -66,6 +66,17 @@ export interface ArrayExpression extends Expression {
   elements: Expression[]
 }
 
+export interface ObjectExpression extends Expression {
+  type: 'ObjectExpression'
+  properties: ObjectProperty[]
+}
+
+export interface ObjectProperty extends ASTNode {
+  type: 'ObjectProperty'
+  key: string
+  value: Expression
+}
+
 // Statements
 export interface Statement extends ASTNode {}
 
