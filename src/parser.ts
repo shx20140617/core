@@ -77,8 +77,16 @@ export interface ObjectProperty extends ASTNode {
   value: Expression
 }
 
+// Comment Statement (standalone or leading)
+export interface CommentStatement extends Statement {
+  type: 'CommentStatement'
+  text: string
+}
+
 // Statements
-export interface Statement extends ASTNode {}
+export interface Statement extends ASTNode {
+  leadingComments?: string[]
+}
 
 export interface NoopStatement extends Statement {
   type: 'NoopStatement'
@@ -199,6 +207,7 @@ export class Parser {
   private previousToken: Token | null = null
   private currentToken: Token | null = null
   private nextToken: Token | null = null
+  private pendingComments: string[] = []
 
   constructor(private lexer: Lexer) {
     // Initialize: load first token into current, second into next
@@ -211,6 +220,7 @@ export class Parser {
     this.previousToken = null
     this.currentToken = null
     this.nextToken = null
+    this.pendingComments = []
     if (lexer) {
       this.lexer = lexer
     }
@@ -223,17 +233,25 @@ export class Parser {
   }
 
   private loadNextToken(): void {
-    // Skip comments and load next meaningful token
-    do {
+    // Capture comments, skip whitespace/newlines
+    while (true) {
       if (this.lexer.isAtEnd()) {
         this.nextToken = null
         return
       }
       this.nextToken = this.lexer.next()
-    } while (
-      this.nextToken.type === TokenType.Comment ||
-      (this.nextToken.type === TokenType.Eol && this.nextToken.value !== ';')
-    )
+      if (this.nextToken.type === TokenType.Comment) {
+        this.pendingComments.push(this.nextToken.value)
+        // Continue reading to find the next non-comment token
+        continue
+      }
+      // Skip newlines (but keep semicolons)
+      if (this.nextToken.type === TokenType.Eol && this.nextToken.value !== ';') {
+        continue
+      }
+      // Found a real token
+      return
+    }
   }
 
   private isEof(): boolean {
@@ -811,93 +829,115 @@ export class Parser {
 
   // Statement parsing
   private parseStatement(): Statement {
+    // Capture pending comments before parsing the statement
+    const leadingComments =
+      this.pendingComments.length > 0 ? [...this.pendingComments] : undefined
+    this.pendingComments = []
+
     try {
+      let stmt: Statement
+
       if (this.match(TokenType.Keyword)) {
         const keyword = this.previous().value
         switch (keyword) {
           case 'let':
           case 'global':
-            return this.parseVariableDeclaration(keyword === 'global')
+            stmt = this.parseVariableDeclaration(keyword === 'global')
+            break
           case 'if':
-            return this.parseIfStatement()
+            stmt = this.parseIfStatement()
+            break
           case 'while':
-            return this.parseWhileStatement()
+            stmt = this.parseWhileStatement()
+            break
           case 'for':
-            return this.parseForStatement()
+            stmt = this.parseForStatement()
+            break
           case 'loop':
-            return this.parseLoopStatement()
+            stmt = this.parseLoopStatement()
+            break
           case 'return':
-            return this.parseReturnStatement()
+            stmt = this.parseReturnStatement()
+            break
           case 'fn':
-            return this.parseFunctionDeclaration()
+            stmt = this.parseFunctionDeclaration()
+            break
           case 'extern':
-            return this.parseExternDeclaration()
+            stmt = this.parseExternDeclaration()
+            break
           case 'module':
           case 'namespace':
-            return this.parseModuleDeclaration()
+            stmt = this.parseModuleDeclaration()
+            break
           case 'import':
-            return this.parseImportStatement()
+            stmt = this.parseImportStatement()
+            break
+          default:
+            throw new ParserError(
+              `Unexpected keyword: ${keyword}`,
+              this.peek()
+            )
         }
-      }
-
-      if (this.matchPunctuation('@')) {
-        return this.parseDecoratorStatement()
-      }
-
-      if (this.check(TokenType.Eol) && this.peek().value === ';') {
+      } else if (this.matchPunctuation('@')) {
+        stmt = this.parseDecoratorStatement()
+      } else if (this.check(TokenType.Eol) && this.peek().value === ';') {
         const token = this.advance()
-        return {
+        stmt = {
           type: 'NoopStatement',
           line: token.line,
           column: token.column
         } as NoopStatement
-      }
-
-      // Check for prefix increment/decrement or assignment
-      if (this.matchOperator('++', '--')) {
+      } else if (this.matchOperator('++', '--')) {
+        // Check for prefix increment/decrement or assignment
         const operator = this.previous().value
         const expr = this.parseExpression()
-        return {
+        stmt = {
           type: 'IncrementStatement',
           operator,
           target: expr,
           line: expr.line,
           column: expr.column
         } as IncrementStatement
+      } else {
+        // Parse expression, then check for assignment or postfix increment
+        const expr = this.parseExpression()
+
+        if (this.matchOperator('=', '+=', '-=', '*=', '/=', '%=', '..=')) {
+          const operator = this.previous().value
+          const right = this.parseExpression()
+          stmt = {
+            type: 'AssignmentStatement',
+            left: expr,
+            operator,
+            right,
+            line: expr.line,
+            column: expr.column
+          } as AssignmentStatement
+        } else if (this.matchOperator('++', '--')) {
+          const operator = this.previous().value
+          stmt = {
+            type: 'IncrementStatement',
+            operator,
+            target: expr as IdentifierExpression,
+            line: expr.line,
+            column: expr.column
+          } as IncrementStatement
+        } else {
+          // Just an expression statement
+          stmt = {
+            type: 'ExpressionStatement',
+            expression: expr,
+            line: expr.line,
+            column: expr.column
+          } as ExpressionStatement
+        }
       }
 
-      // Parse expression, then check for assignment or postfix increment
-      const expr = this.parseExpression()
-
-      if (this.matchOperator('=', '+=', '-=', '*=', '/=', '%=', '..=')) {
-        const operator = this.previous().value
-        const right = this.parseExpression()
-        return {
-          type: 'AssignmentStatement',
-          left: expr,
-          operator,
-          right,
-          line: expr.line,
-          column: expr.column
-        } as AssignmentStatement
-      } else if (this.matchOperator('++', '--')) {
-        const operator = this.previous().value
-        return {
-          type: 'IncrementStatement',
-          operator,
-          target: expr as IdentifierExpression,
-          line: expr.line,
-          column: expr.column
-        } as IncrementStatement
+      // Attach captured leading comments to the statement
+      if (leadingComments && leadingComments.length > 0) {
+        stmt.leadingComments = leadingComments
       }
-
-      // Just an expression statement
-      return {
-        type: 'ExpressionStatement',
-        expression: expr,
-        line: expr.line,
-        column: expr.column
-      } as ExpressionStatement
+      return stmt
     } catch (error) {
       this.synchronize()
       throw error
@@ -1608,11 +1648,26 @@ export function toSource(node: ASTNode, indent = 2, semi = false): string {
     if (statements.length === 0) return ''
     return statements
       .map(stmt => {
+        // Emit leading comments before the statement
+        const commentLines: string[] = []
+        if (stmt.leadingComments && stmt.leadingComments.length > 0) {
+          for (const c of stmt.leadingComments) {
+            const commentText = c.replace(/^\/\/\s?/, '')
+            if (indent === 0) {
+              commentLines.push(`// ${commentText}`)
+            } else {
+              commentLines.push(indentStr.repeat(level) + `// ${commentText}`)
+            }
+          }
+        }
         const source = toSourceImpl(stmt, level)
         // Only add indentation if the statement doesn't start with whitespace
         // (which would indicate it's already been indented by a nested block)
-        if (indent === 0) return source
-        return indentStr.repeat(level) + source
+        const indented = indent === 0 ? source : indentStr.repeat(level) + source
+        if (commentLines.length > 0) {
+          return [...commentLines, indented].join(nl)
+        }
+        return indented
       })
       .join(nl)
   }
@@ -1858,6 +1913,12 @@ export function toSource(node: ASTNode, indent = 2, semi = false): string {
       case 'Program': {
         const program = node as Program
         return formatBlock(program.body, 0)
+      }
+
+      case 'CommentStatement': {
+        const comment = node as CommentStatement
+        const commentText = comment.text.replace(/^\/\/\s?/, '')
+        return `// ${commentText}`
       }
 
       default:
