@@ -285,7 +285,7 @@ export class Lexer {
 
     return {
       type: TokenType.Comment,
-      value: '//' + value,
+      value: '//' + value.replace(/\r$/, ''),
       line: this.line,
       column: startColumn
     }
