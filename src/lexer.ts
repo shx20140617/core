@@ -30,6 +30,7 @@ const keywords = new Set([
   'false',
   'once',
   'module',
+  'namespace',
   'extern',
   'import'
 ])

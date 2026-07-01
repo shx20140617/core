@@ -733,6 +733,10 @@ export class Parser {
       return this.parseArrayLiteral()
     }
 
+    if (this.matchPunctuation('{')) {
+      return this.parseObjectLiteral()
+    }
+
     const token = this.peek()
     throw new ParserError(
       `Unexpected token ${token.type}: ${token.value}`,
@@ -760,6 +764,51 @@ export class Parser {
     } as ArrayExpression
   }
 
+  private parseObjectLiteral(): ObjectExpression {
+    const start = this.previous()
+    const properties: ObjectProperty[] = []
+
+    while (!this.check(TokenType.Punctuation) || this.peek().value !== '}') {
+      if (this.isEof()) {
+        throw new ParserError('Unterminated object literal', start)
+      }
+
+      let key: string
+      if (this.match(TokenType.String)) {
+        key = this.previous().value
+      } else if (this.match(TokenType.Identifier)) {
+        key = this.previous().value
+      } else {
+        const token = this.peek()
+        throw new ParserError('Expected property key', token)
+      }
+
+      this.consumePunctuation(':', "Expected ':' after property key")
+      const value = this.parseExpression()
+
+      properties.push({
+        type: 'ObjectProperty',
+        key,
+        value,
+        line: this.previous().line,
+        column: this.previous().column
+      } as ObjectProperty)
+
+      if (this.check(TokenType.Punctuation) && this.peek().value === ',') {
+        this.advance()
+      }
+    }
+
+    this.consumePunctuation('}', "Expected '}' after object literal")
+
+    return {
+      type: 'ObjectExpression',
+      properties,
+      line: start.line,
+      column: start.column
+    } as ObjectExpression
+  }
+
   // Statement parsing
   private parseStatement(): Statement {
     try {
@@ -784,6 +833,7 @@ export class Parser {
           case 'extern':
             return this.parseExternDeclaration()
           case 'module':
+          case 'namespace':
             return this.parseModuleDeclaration()
           case 'import':
             return this.parseImportStatement()
@@ -1240,6 +1290,30 @@ export class Parser {
 
     // Check for alias syntax: module B = A (with member access support like A.B.C)
     if (this.matchOperator('=')) {
+      // namespace name = { body } syntax: treat = { ... } as a body block
+      if (this.check(TokenType.Punctuation) && this.peek().value === '{') {
+        const body: Statement[] = []
+        this.consumePunctuation('{', "Expected '{' after module name")
+        while (!this.check(TokenType.Punctuation) || this.peek().value !== '}') {
+          if (this.isEof()) {
+            throw new ParserError('Unterminated module', start)
+          }
+          body.push(this.parseStatement())
+        }
+        this.consumePunctuation('}', "Expected '}' after module body")
+        return {
+          type: 'ModuleDeclaration',
+          name: {
+            type: 'Identifier',
+            name: nameToken.value,
+            line: nameToken.line,
+            column: nameToken.column
+          },
+          body,
+          line: start.line,
+          column: start.column
+        } as ModuleDeclaration
+      }
       const alias = this.parseTypeExpression()
       return {
         type: 'ModuleDeclaration',
@@ -1618,6 +1692,15 @@ export function toSource(node: ASTNode, indent = 2, semi = false): string {
           .map(el => toSourceImpl(el, level))
           .join(`,${sp}`)
         return `[${elements}]`
+      }
+
+      case 'ObjectExpression': {
+        const obj = node as ObjectExpression
+        const props = obj.properties
+          .map(p => `${p.key}:${sp}${toSourceImpl(p.value, level)}`)
+          .join(`,${nl}${indentStr.repeat(level + 1)}`)
+        if (props.length === 0) return '{}'
+        return `{${nl}${indentStr.repeat(level + 1)}${props}${nl}${indentStr.repeat(level)}}`
       }
 
       // Statements
